@@ -29,6 +29,13 @@ OBJDUMP = $(TOOLPREFIX)objdump
 OPT ?= -O0
 XFLAGS = -m64 -DX64 -mcmodel=large -mtls-direct-seg-refs -mno-red-zone
 
+RUSTC ?= rustc
+RUST_TARGET ?= x86_64-unknown-none
+RUST_USER_LIB ?= rust/libuserlib.a
+RUST_USER_RLIB ?= rust/libuserlib.rlib
+RUST_USER_PROGS = hello
+RUST_USER_OBJS := $(addsuffix .o,$(RUST_USER_PROGS))
+
 CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -Wall -MD -ggdb -fno-omit-frame-pointer
 CFLAGS += -ffreestanding -fno-common -nostdlib $(XFLAGS) $(OPT)
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
@@ -72,6 +79,14 @@ kernel: $(KERNOBJS) entry.o entryother initcode kernel.ld
 	$(OBJDUMP) -S kernel > kernel.asm
 	$(OBJDUMP) -t kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' | sort > kernel.sym
 
+$(RUST_USER_LIB): rust/userlib.rs
+	$(RUSTC) --crate-name userlib --crate-type rlib --crate-type staticlib --target $(RUST_TARGET) -C panic=abort -C opt-level=0 -C codegen-units=1 $< --out-dir rust
+
+$(RUST_USER_RLIB): $(RUST_USER_LIB)
+
+$(RUST_USER_OBJS): %.o: rust/userprogs/%.rs $(RUST_USER_RLIB)
+	$(RUSTC) --target $(RUST_TARGET) -C panic=abort -C opt-level=0 -C codegen-units=1 --emit=obj -o $@ -L rust --extern userlib=$(RUST_USER_RLIB) $<
+
 depend: .depend
 
 .depend: $(wildcard *.c)
@@ -101,6 +116,12 @@ _%: %.o $(ULIB) user.ld
 	$(OBJDUMP) -S $@ > $*.asm
 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' | sort > $*.sym
 
+$(addprefix _, $(RUST_USER_PROGS)): _%: %.o $(ULIB) $(RUST_USER_LIB) user.ld
+	$(LD) $(LDFLAGS) -n -N -T user.ld -e main -Ttext 0x1000 --gc-sections -o $@ $< $(RUST_USER_LIB) $(ULIB)
+	$(TOOLPREFIX)strip $@
+	$(OBJDUMP) -S $@ > $*.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' | sort > $*.sym
+
 _forktest: forktest.o $(ULIB) user.ld
 	# forktest has less library code linked in - needs to be small
 	# in order to be able to max out the proc table.
@@ -120,6 +141,8 @@ UPROGS= \
 	_cat _echo _forktest _grep _init _kill _ln _ls _mkdir \
 	_rm _sh _stressfs _usertests _wc _zombie \
 #
+
+UPROGS += $(addprefix _, $(RUST_USER_PROGS))
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

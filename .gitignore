@@ -21,3 +21,5 @@ mkfs
 .history/
 .vscode/
 cscope.out
+rust/libuserlib.a
+rust/libuserlib.a
