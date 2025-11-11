@@ -45,6 +45,15 @@ print_x32(uint x)
 }
 
   static void
+print_x8(int v)
+{
+  int i;
+  uchar x = v;
+  for (i = 0; i < 2; i++, x <<= 4)
+    consputc(digits[x >> 4]);
+}
+
+  static void
 print_d(int v)
 {
   char buf[16];
@@ -95,6 +104,9 @@ cprintf(char *fmt, ...)
     switch(c) {
     case 'd':
       print_d(va_arg(ap, int));
+      break;
+    case 'b':
+      print_x8(va_arg(ap, int));
       break;
     case 'x':
       print_x32(va_arg(ap, uint));

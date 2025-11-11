@@ -13,6 +13,7 @@ entryother
 initcode
 initcode.out
 kernel
+!rust/kernel
 kernelmemfs
 mkfs
 .gdbinit
@@ -23,3 +24,4 @@ mkfs
 cscope.out
 rust/libuserlib.a
 rust/libuserlib.a
+rust/kernel/net.a
