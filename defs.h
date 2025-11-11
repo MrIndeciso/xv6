@@ -188,3 +188,6 @@ void            clearpteu(pml4e_t *pgdir, char *uva);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+// rust/net.rs
+void            net_init(void);

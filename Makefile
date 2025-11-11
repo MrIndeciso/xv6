@@ -2,6 +2,7 @@ KERNOBJS = \
 	bio.o console.o exec.o file.o fs.o ide.o ioapic.o kalloc.o kbd.o lapic.o \
   log.o main.o mp.o pipe.o proc.o sleeplock.o spinlock.o string.o swtch.o \
   syscall.o sysfile.o sysproc.o trapasm.o trap.o uart.o vectors.o vm.o \
+  net.o
 #
 
 UNAME_S := $(shell uname -s)
@@ -26,6 +27,7 @@ AS = $(TOOLPREFIX)as
 LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
+AR = $(TOOLPREFIX)ar
 OPT ?= -O0
 XFLAGS = -m64 -DX64 -mcmodel=large -mtls-direct-seg-refs -mno-red-zone
 
@@ -86,6 +88,14 @@ $(RUST_USER_RLIB): $(RUST_USER_LIB)
 
 $(RUST_USER_OBJS): %.o: rust/userprogs/%.rs $(RUST_USER_RLIB)
 	$(RUSTC) --target $(RUST_TARGET) -C panic=abort -C opt-level=0 -C codegen-units=1 --emit=obj -o $@ -L rust --extern userlib=$(RUST_USER_RLIB) $<
+
+net.o: rust/kernel/net.rs
+	$(RUSTC) --crate-type staticlib --target $(RUST_TARGET) -C panic=abort -C opt-level=0 -C lto=off -o rust/kernel/netlib.a $<
+	rm -rf rust/kernel/.netobj
+	mkdir -p rust/kernel/.netobj
+	cd rust/kernel/.netobj && $(AR) x ../netlib.a
+	$(LD) -r -o $@ rust/kernel/.netobj/*.o
+	rm -rf rust/kernel/.netobj rust/kernel/netlib.a
 
 depend: .depend
 
@@ -179,7 +189,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 2
 endif
-QEMUOPTS = -cpu qemu64,+rdtscp -nic none -hda xv6.img -hdb fs.img -smp sockets=$(CPUS) -m 512 $(QEMUEXTRA)
+QEMUOPTS = -cpu qemu64,+rdtscp -nic none -netdev user,id=net0 -device e1000,netdev=net0 -hda xv6.img -hdb fs.img -smp sockets=$(CPUS) -m 512 $(QEMUEXTRA)
 
 qemu: fs.img xv6.img
 	$(QEMU) -serial mon:stdio $(QEMUOPTS)
