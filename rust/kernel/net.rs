@@ -2,6 +2,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_uint;
+use core::mem::size_of;
 use core::panic::PanicInfo;
 use core::ptr;
 
@@ -9,6 +10,7 @@ extern "C" {
     fn panic(msg: *const u8) -> !;
     fn cprintf(fmt: *const u8, ...);
     fn microdelay(us: i32);
+    fn kalloc() -> *mut u8;
 }
 
 unsafe fn inl(port: u16) -> u32 {
@@ -33,12 +35,26 @@ unsafe fn outl(port: u16, data: u32) {
 
 const KERNBASE: u64        = 0xFFFF8000_00000000;
 
-const REG_EERD: usize      = 0x00014;
+const REG_EERD: usize       = 0x00014;
+const REG_RXDESCLO: usize   = 0x02800;
+const REG_RXDESCHI: usize   = 0x02804;
+const REG_RXDESCLEN: usize  = 0x02808;
+const REG_RXDESCHEAD: usize = 0x02810;
+const REG_RXDESCTAIL: usize = 0x02818;
+const REG_RXDCTL: usize     = 0x02828;
 
-const EERD_START: u32      = 1 << 0;
-const EERD_DONE: u32       = 1 << 4;
-const EERD_ADDR_SHIFT: u32 = 1 << 3;
-const EERD_DATA_SHIFT: u32 = 1 << 4;
+const EERD_START: u32       = 1 << 0;
+const EERD_DONE: u32        = 1 << 4;
+const EERD_ADDR_SHIFT: u32  = 1 << 3;
+const EERD_DATA_SHIFT: u32  = 1 << 4;
+
+const RXDCTL_PTHRESH_SHIFT: u32 = 0;
+const RXDCTL_HTHRESH_SHIFT: u32 = 8;
+const RXDCTL_WTHRESH_SHIFT: u32 = 16;
+const RXDCTL_ENABLE: u32        = 1 << 25;
+
+const NET_RX_DESC_COUNT: usize = 32;
+const PGSIZE: usize = 4096;
 
 struct NetState {
     mmio: *mut u8,
@@ -46,6 +62,9 @@ struct NetState {
     bus: u8,
     slot: u8,
     func: u8,
+    rx_descs: *mut RxDesc,
+    rx_buffers: [*mut u8; NET_RX_DESC_COUNT],
+    rx_cur: u32,
 }
 
 struct NetStateCell(UnsafeCell<NetState>);
@@ -68,7 +87,24 @@ static STATE: NetStateCell = NetStateCell::new(NetState {
     bus: 0,
     slot: 0,
     func: 0,
+    rx_descs: ptr::null_mut(),
+    rx_buffers: [ptr::null_mut(); NET_RX_DESC_COUNT],
+    rx_cur: 0,
 });
+
+#[repr(C)]
+struct RxDesc {
+    addr: u64,
+    length: u16,
+    checksum: u16,
+    status: u8,
+    errors: u8,
+    special: u16,
+}
+
+fn v2p(addr: *mut u8) -> u64 {
+    (addr as u64).wrapping_sub(KERNBASE)
+}
 
 #[panic_handler]
 fn panic_handler(_info: &PanicInfo) -> ! {
@@ -194,6 +230,53 @@ fn read_mac_address(state: &mut NetState) {
     state.mac[5] = (words[2] >> 8) as u8;
 }
 
+fn rx_init(state: &mut NetState) {
+    unsafe {
+        let desc_mem = kalloc();
+        if desc_mem.is_null() {
+            cpanic(b"net: cannot allocate rx descriptors\0");
+        }
+        ptr::write_bytes(desc_mem, 0, NET_RX_DESC_COUNT * size_of::<RxDesc>());
+
+        state.rx_descs = desc_mem as *mut RxDesc;
+        state.rx_cur = 0;
+
+        for i in 0..NET_RX_DESC_COUNT {
+            let buf = kalloc();
+            if buf.is_null() {
+                cpanic(b"net: cannot allocate rx buffer\0");
+            }
+            ptr::write_bytes(buf, 0, PGSIZE);
+            state.rx_buffers[i] = buf;
+
+            let desc = state.rx_descs.add(i);
+            (*desc).addr = v2p(buf);
+            (*desc).length = 0;
+            (*desc).checksum = 0;
+            (*desc).status = 0;
+            (*desc).errors = 0;
+            (*desc).special = 0;
+        }
+
+        let rx_phys = v2p(state.rx_descs as *mut u8);
+        writereg(state, REG_RXDESCLO, rx_phys as u32);
+        writereg(state, REG_RXDESCHI, (rx_phys >> 32) as u32);
+        writereg(
+            state,
+            REG_RXDESCLEN,
+            (NET_RX_DESC_COUNT * size_of::<RxDesc>()) as u32,
+        );
+        writereg(state, REG_RXDESCHEAD, 0);
+        writereg(state, REG_RXDESCTAIL, (NET_RX_DESC_COUNT - 1) as u32);
+
+        let rxdctl = (4 << RXDCTL_PTHRESH_SHIFT)
+            | (1 << RXDCTL_HTHRESH_SHIFT)
+            | (1 << RXDCTL_WTHRESH_SHIFT)
+            | RXDCTL_ENABLE;
+        writereg(state, REG_RXDCTL, rxdctl);
+    }
+}
+
 fn setup_mmio(state: &mut NetState, bus: u8, slot: u8, func: u8) {
     let bar0 = pci_config_read_u32(bus, slot, func, 0x10);
     if (bar0 & 0x1) != 0 {
@@ -242,6 +325,8 @@ fn net_init_internal() {
     print(b"Reading MAC address...\n\0");
     read_mac_address(state);
     print_mac_address(state);
+    print(b"Initializing RX ring...\n\0");
+    rx_init(state);
 }
 
 #[no_mangle]
