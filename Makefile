@@ -35,7 +35,7 @@ RUSTC ?= rustc
 RUST_TARGET ?= x86_64-unknown-none
 RUST_USER_LIB ?= rust/libuserlib.a
 RUST_USER_RLIB ?= rust/libuserlib.rlib
-RUST_USER_PROGS = hello
+RUST_USER_PROGS = hello netd
 RUST_USER_OBJS := $(addsuffix .o,$(RUST_USER_PROGS))
 
 CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -Wall -MD -ggdb -fno-omit-frame-pointer

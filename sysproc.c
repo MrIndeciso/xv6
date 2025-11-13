@@ -87,3 +87,23 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+addr_t
+sys_getmac(void)
+{
+  addr_t uptr;
+  int len;
+  uchar mac[6];
+
+  if(argaddr(0, &uptr) < 0)
+    return -1;
+  if(argint(1, &len) < 0)
+    return -1;
+  if(len < sizeof(mac))
+    return -1;
+  if(net_get_mac(mac, sizeof(mac)) < 0)
+    return -1;
+  if(copyout(proc->pgdir, uptr, mac, sizeof(mac)) < 0)
+    return -1;
+  return 0;
+}

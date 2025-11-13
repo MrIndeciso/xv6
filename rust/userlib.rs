@@ -24,6 +24,7 @@ const SYS_UNLINK: u64 = 18;
 const SYS_LINK: u64 = 19;
 const SYS_MKDIR: u64 = 20;
 const SYS_CLOSE: u64 = 21;
+const SYS_GETMAC: u64 = 22;
 
 // File modes
 pub const O_RDONLY: i32 = 0x000;
@@ -143,6 +144,13 @@ pub fn sleep(n: u32) -> i32 {
 
 pub fn uptime() -> i32 {
     unsafe { syscall(SYS_UPTIME, 0, 0, 0) as i32 }
+}
+
+pub fn getmac(buf: &mut [u8]) -> i32 {
+    if buf.len() < 6 {
+        return -1;
+    }
+    unsafe { syscall(SYS_GETMAC, buf.as_mut_ptr() as u64, buf.len() as u64, 0) as i32 }
 }
 
 pub fn print(s: &str) {

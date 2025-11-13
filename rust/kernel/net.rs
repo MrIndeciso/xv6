@@ -35,26 +35,41 @@ unsafe fn outl(port: u16, data: u32) {
 
 const KERNBASE: u64        = 0xFFFF8000_00000000;
 
-const REG_EERD: usize       = 0x00014;
-const REG_RXDESCLO: usize   = 0x02800;
-const REG_RXDESCHI: usize   = 0x02804;
-const REG_RXDESCLEN: usize  = 0x02808;
-const REG_RXDESCHEAD: usize = 0x02810;
-const REG_RXDESCTAIL: usize = 0x02818;
-const REG_RXDCTL: usize     = 0x02828;
+const REG_EERD: usize        = 0x00014;
+const REG_TCTL: usize        = 0x00400;
+const REG_TIPG: usize        = 0x00410;
+const REG_RXDESCLO: usize    = 0x02800;
+const REG_RXDESCHI: usize    = 0x02804;
+const REG_RXDESCLEN: usize   = 0x02808;
+const REG_RXDESCHEAD: usize  = 0x02810;
+const REG_RXDESCTAIL: usize  = 0x02818;
+const REG_RXDCTL: usize      = 0x02828;
+const REG_TXDESCLO: usize    = 0x03800;
+const REG_TXDESCHI: usize    = 0x03804;
+const REG_TXDESCLEN: usize   = 0x03808;
+const REG_TXDESCHEAD: usize  = 0x03810;
+const REG_TXDESCTAIL: usize  = 0x03818;
 
-const EERD_START: u32       = 1 << 0;
-const EERD_DONE: u32        = 1 << 4;
-const EERD_ADDR_SHIFT: u32  = 1 << 3;
-const EERD_DATA_SHIFT: u32  = 1 << 4;
+const EERD_START: u32        = 1 << 0;
+const EERD_DONE: u32         = 1 << 4;
+const EERD_ADDR_SHIFT: u32   = 1 << 3;
+const EERD_DATA_SHIFT: u32   = 1 << 4;
 
 const RXDCTL_PTHRESH_SHIFT: u32 = 0;
 const RXDCTL_HTHRESH_SHIFT: u32 = 8;
 const RXDCTL_WTHRESH_SHIFT: u32 = 16;
 const RXDCTL_ENABLE: u32        = 1 << 25;
 
+const TCTL_EN: u32          = 1 << 1;
+const TCTL_PSP: u32         = 1 << 3;
+const TCTL_CT_SHIFT: u32    = 4;
+const TCTL_COLD_SHIFT: u32  = 12;
+const TIPG_DEFAULT: u32     = 0x0060_200A;
+
 const NET_RX_DESC_COUNT: usize = 32;
+const NET_TX_DESC_COUNT: usize = 32;
 const PGSIZE: usize = 4096;
+const TX_STATUS_DD: u8 = 1 << 0;
 
 struct NetState {
     mmio: *mut u8,
@@ -65,6 +80,9 @@ struct NetState {
     rx_descs: *mut RxDesc,
     rx_buffers: [*mut u8; NET_RX_DESC_COUNT],
     rx_cur: u32,
+    tx_descs: *mut TxDesc,
+    tx_buffers: [*mut u8; NET_TX_DESC_COUNT],
+    tx_tail: u32,
 }
 
 struct NetStateCell(UnsafeCell<NetState>);
@@ -90,6 +108,9 @@ static STATE: NetStateCell = NetStateCell::new(NetState {
     rx_descs: ptr::null_mut(),
     rx_buffers: [ptr::null_mut(); NET_RX_DESC_COUNT],
     rx_cur: 0,
+    tx_descs: ptr::null_mut(),
+    tx_buffers: [ptr::null_mut(); NET_TX_DESC_COUNT],
+    tx_tail: 0,
 });
 
 #[repr(C)]
@@ -99,6 +120,17 @@ struct RxDesc {
     checksum: u16,
     status: u8,
     errors: u8,
+    special: u16,
+}
+
+#[repr(C)]
+struct TxDesc {
+    addr: u64,
+    length: u16,
+    cso: u8,
+    cmd: u8,
+    status: u8,
+    css: u8,
     special: u16,
 }
 
@@ -277,6 +309,55 @@ fn rx_init(state: &mut NetState) {
     }
 }
 
+fn tx_init(state: &mut NetState) {
+    unsafe {
+        let desc_mem = kalloc();
+        if desc_mem.is_null() {
+            cpanic(b"net: cannot allocate tx descriptors\0");
+        }
+        ptr::write_bytes(desc_mem, 0, NET_TX_DESC_COUNT * size_of::<TxDesc>());
+
+        state.tx_descs = desc_mem as *mut TxDesc;
+        state.tx_tail = 0;
+
+        for i in 0..NET_TX_DESC_COUNT {
+            let buf = kalloc();
+            if buf.is_null() {
+                cpanic(b"net: cannot allocate tx buffer\0");
+            }
+            ptr::write_bytes(buf, 0, PGSIZE);
+            state.tx_buffers[i] = buf;
+
+            let desc = state.tx_descs.add(i);
+            (*desc).addr = v2p(buf);
+            (*desc).length = 0;
+            (*desc).cso = 0;
+            (*desc).cmd = 0;
+            (*desc).status = TX_STATUS_DD;
+            (*desc).css = 0;
+            (*desc).special = 0;
+        }
+
+        let tx_phys = v2p(state.tx_descs as *mut u8);
+        writereg(state, REG_TXDESCLO, tx_phys as u32);
+        writereg(state, REG_TXDESCHI, (tx_phys >> 32) as u32);
+        writereg(
+            state,
+            REG_TXDESCLEN,
+            (NET_TX_DESC_COUNT * size_of::<TxDesc>()) as u32,
+        );
+        writereg(state, REG_TXDESCHEAD, 0);
+        writereg(state, REG_TXDESCTAIL, 0);
+
+        let tctl = TCTL_EN
+            | TCTL_PSP
+            | (0x10 << TCTL_CT_SHIFT)
+            | (0x40 << TCTL_COLD_SHIFT);
+        writereg(state, REG_TCTL, tctl);
+        writereg(state, REG_TIPG, TIPG_DEFAULT);
+    }
+}
+
 fn setup_mmio(state: &mut NetState, bus: u8, slot: u8, func: u8) {
     let bar0 = pci_config_read_u32(bus, slot, func, 0x10);
     if (bar0 & 0x1) != 0 {
@@ -327,9 +408,23 @@ fn net_init_internal() {
     print_mac_address(state);
     print(b"Initializing RX ring...\n\0");
     rx_init(state);
+    print(b"Initializing TX ring...\n\0");
+    tx_init(state);
 }
 
 #[no_mangle]
 pub extern "C" fn net_init() {
     net_init_internal();
+}
+
+#[no_mangle]
+pub extern "C" fn net_get_mac(dst: *mut u8, len: usize) -> i32 {
+    if dst.is_null() || len < 6 {
+        return -1;
+    }
+    unsafe {
+        let state = STATE.get();
+        ptr::copy_nonoverlapping(state.mac.as_ptr(), dst, 6);
+    }
+    0
 }
