@@ -38,6 +38,7 @@ const KERNBASE: u64        = 0xFFFF8000_00000000;
 const REG_EERD: usize        = 0x00014;
 const REG_TCTL: usize        = 0x00400;
 const REG_TIPG: usize        = 0x00410;
+const REG_ICR: usize         = 0x00C0;
 const REG_RXDESCLO: usize    = 0x02800;
 const REG_RXDESCHI: usize    = 0x02804;
 const REG_RXDESCLEN: usize   = 0x02808;
@@ -65,6 +66,8 @@ const TCTL_PSP: u32         = 1 << 3;
 const TCTL_CT_SHIFT: u32    = 4;
 const TCTL_COLD_SHIFT: u32  = 12;
 const TIPG_DEFAULT: u32     = 0x0060_200A;
+const INT_TXDW: u32         = 1 << 0;
+const INT_RXT0: u32         = 1 << 7;
 
 const NET_RX_DESC_COUNT: usize = 32;
 const NET_TX_DESC_COUNT: usize = 32;
@@ -83,6 +86,7 @@ struct NetState {
     tx_descs: *mut TxDesc,
     tx_buffers: [*mut u8; NET_TX_DESC_COUNT],
     tx_tail: u32,
+    initialized: bool,
 }
 
 struct NetStateCell(UnsafeCell<NetState>);
@@ -111,6 +115,7 @@ static STATE: NetStateCell = NetStateCell::new(NetState {
     tx_descs: ptr::null_mut(),
     tx_buffers: [ptr::null_mut(); NET_TX_DESC_COUNT],
     tx_tail: 0,
+    initialized: false,
 });
 
 #[repr(C)]
@@ -410,11 +415,39 @@ fn net_init_internal() {
     rx_init(state);
     print(b"Initializing TX ring...\n\0");
     tx_init(state);
+    state.initialized = true;
+}
+
+fn net_wakeup_rx(_state: &mut NetState) {
+
 }
 
 #[no_mangle]
 pub extern "C" fn net_init() {
     net_init_internal();
+}
+
+#[no_mangle]
+pub extern "C" fn netintr() {
+    print(b"net interrupt received\n\0");
+
+    let state = unsafe { STATE.get() };
+    if !state.initialized || state.mmio.is_null() {
+        return;
+    }
+
+    let icr = readreg(state, REG_ICR);
+    if icr == 0 {
+        return;
+    }
+
+    if (icr & INT_RXT0) != 0 {
+        net_wakeup_rx(state);
+    }
+
+    if (icr & INT_TXDW) != 0 {
+        // transmit interrupt acknowledged
+    }
 }
 
 #[no_mangle]

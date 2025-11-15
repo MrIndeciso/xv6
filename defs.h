@@ -191,4 +191,5 @@ void            clearpteu(pml4e_t *pgdir, char *uva);
 
 // rust/net.rs
 void            net_init(void);
+void            netintr(void);
 int             net_get_mac(uchar*, int);
