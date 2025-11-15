@@ -23,5 +23,5 @@ mkfs
 .vscode/
 cscope.out
 rust/libuserlib.a
-rust/libuserlib.a
+rust/libuserlib.rlib
 rust/kernel/net.a
