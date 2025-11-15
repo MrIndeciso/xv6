@@ -3,7 +3,10 @@
 
 extern crate userlib;
 
-use userlib::{exit, getmac, println, write};
+use userlib::{close, exit, getmac, mknod, open, println, println_u64, read, write, O_RDONLY};
+
+const NETDEV_MAJOR: i16 = 2;
+const NETDEV_PATH: &str = "net\0";
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -16,7 +19,38 @@ pub extern "C" fn main() -> i32 {
 
     println!("netd: mac address");
     print_mac(&mac);
+
+    let fd = ensure_net_device();
+    if fd < 0 {
+        println!("netd: unable to open net device");
+        exit(1);
+    }
+
+    let mut buf = [0u8; 2048];
+    let n = read(fd, &mut buf);
+    if n > 0 {
+        println!("netd: received packet bytes");
+        println_u64(n as u64);
+    } else if n == 0 {
+        println!("netd: no packets available");
+    } else {
+        println!("netd: read error");
+    }
+
+    close(fd);
     exit(0)
+}
+
+fn ensure_net_device() -> i32 {
+    let mut fd = open(NETDEV_PATH, O_RDONLY);
+    if fd >= 0 {
+        return fd;
+    }
+    if mknod(NETDEV_PATH, NETDEV_MAJOR, 0) < 0 {
+        return -1;
+    }
+    fd = open(NETDEV_PATH, O_RDONLY);
+    fd
 }
 
 fn print_mac(mac: &[u8; 6]) {

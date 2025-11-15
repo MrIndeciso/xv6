@@ -33,6 +33,7 @@ main(void)
   fileinit();      // file table
   ideinit();       // disk
   net_init();
+  netdevinit();    // network device interface
   startothers();   // start other processors
   kinit2();
   userinit();      // first user process

@@ -1,16 +1,29 @@
 #![no_std]
 
-use core::cell::UnsafeCell;
-use core::ffi::c_uint;
+mod net_types;
+
+use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::panic::PanicInfo;
 use core::ptr;
+
+use net_types::{
+    NetState,
+    NetStateCell,
+    RxDesc,
+    TxDesc,
+    NET_RX_DESC_COUNT,
+    NET_TX_DESC_COUNT,
+    PGSIZE,
+    TX_STATUS_DD,
+};
 
 extern "C" {
     fn panic(msg: *const u8) -> !;
     fn cprintf(fmt: *const u8, ...);
     fn microdelay(us: i32);
     fn kalloc() -> *mut u8;
+    fn wakeup(chan: *mut c_void);
 }
 
 unsafe fn inl(port: u16) -> u32 {
@@ -68,41 +81,8 @@ const TCTL_COLD_SHIFT: u32  = 12;
 const TIPG_DEFAULT: u32     = 0x0060_200A;
 const INT_TXDW: u32         = 1 << 0;
 const INT_RXT0: u32         = 1 << 7;
-
-const NET_RX_DESC_COUNT: usize = 32;
-const NET_TX_DESC_COUNT: usize = 32;
-const PGSIZE: usize = 4096;
-const TX_STATUS_DD: u8 = 1 << 0;
-
-struct NetState {
-    mmio: *mut u8,
-    mac: [u8; 6],
-    bus: u8,
-    slot: u8,
-    func: u8,
-    rx_descs: *mut RxDesc,
-    rx_buffers: [*mut u8; NET_RX_DESC_COUNT],
-    rx_cur: u32,
-    tx_descs: *mut TxDesc,
-    tx_buffers: [*mut u8; NET_TX_DESC_COUNT],
-    tx_tail: u32,
-    initialized: bool,
-}
-
-struct NetStateCell(UnsafeCell<NetState>);
-
-impl NetStateCell {
-    const fn new(state: NetState) -> Self {
-        NetStateCell(UnsafeCell::new(state))
-    }
-
-    unsafe fn get(&self) -> &mut NetState {
-        &mut *self.0.get()
-    }
-}
-
-unsafe impl Sync for NetStateCell {}
-
+const RX_STATUS_DD: u8      = 1 << 0;
+const RX_STATUS_EOP: u8     = 1 << 1;
 static STATE: NetStateCell = NetStateCell::new(NetState {
     mmio: ptr::null_mut(),
     mac: [0; 6],
@@ -118,26 +98,7 @@ static STATE: NetStateCell = NetStateCell::new(NetState {
     initialized: false,
 });
 
-#[repr(C)]
-struct RxDesc {
-    addr: u64,
-    length: u16,
-    checksum: u16,
-    status: u8,
-    errors: u8,
-    special: u16,
-}
-
-#[repr(C)]
-struct TxDesc {
-    addr: u64,
-    length: u16,
-    cso: u8,
-    cmd: u8,
-    status: u8,
-    css: u8,
-    special: u16,
-}
+static mut RX_WAIT_CHAN: u8 = 0;
 
 fn v2p(addr: *mut u8) -> u64 {
     (addr as u64).wrapping_sub(KERNBASE)
@@ -418,13 +379,86 @@ fn net_init_internal() {
     state.initialized = true;
 }
 
-fn net_wakeup_rx(_state: &mut NetState) {
+fn rx_wait_channel() -> *mut c_void {
+    ptr::addr_of_mut!(RX_WAIT_CHAN).cast::<c_void>()
+}
 
+fn recycle_rx_desc(state: &mut NetState, idx: usize) {
+    unsafe {
+        let desc = &mut *state.rx_descs.add(idx);
+        desc.status = 0;
+        desc.errors = 0;
+        desc.length = 0;
+    }
+    let next = (idx + 1) % NET_RX_DESC_COUNT;
+    state.rx_cur = next as u32;
+    let tail = (next + NET_RX_DESC_COUNT - 1) % NET_RX_DESC_COUNT;
+    writereg(state, REG_RXDESCTAIL, tail as u32);
+}
+
+fn net_wakeup_rx(state: &mut NetState) {
+    if state.rx_descs.is_null() {
+        return;
+    }
+
+    let idx = state.rx_cur as usize;
+    let desc = unsafe { &*state.rx_descs.add(idx) };
+    if (desc.status & RX_STATUS_DD) != 0 && (desc.status & RX_STATUS_EOP) != 0 {
+        unsafe { wakeup(rx_wait_channel()); }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn net_init() {
     net_init_internal();
+}
+
+#[no_mangle]
+pub extern "C" fn net_rx(dst: *mut u8, len: u32) -> i32 {
+    if dst.is_null() || len == 0 {
+        return -1;
+    }
+
+    let state = unsafe { STATE.get() };
+    if !state.initialized || state.rx_descs.is_null() {
+        return -1;
+    }
+
+    let idx = state.rx_cur as usize;
+    let desc = unsafe { &mut *state.rx_descs.add(idx) };
+    if (desc.status & RX_STATUS_DD) == 0 || (desc.status & RX_STATUS_EOP) == 0 {
+        return 0;
+    }
+
+    if desc.errors != 0 {
+        recycle_rx_desc(state, idx);
+        return -1;
+    }
+
+    let pkt_len = desc.length as usize;
+    let max_copy = len as usize;
+    if pkt_len == 0 || pkt_len > PGSIZE || pkt_len > max_copy {
+        recycle_rx_desc(state, idx);
+        return -1;
+    }
+
+    let buf = state.rx_buffers[idx];
+    if buf.is_null() {
+        recycle_rx_desc(state, idx);
+        return -1;
+    }
+
+    unsafe {
+        ptr::copy_nonoverlapping(buf, dst, pkt_len);
+    }
+
+    recycle_rx_desc(state, idx);
+    pkt_len as i32
+}
+
+#[no_mangle]
+pub extern "C" fn net_rx_chan() -> *mut c_void {
+    rx_wait_channel()
 }
 
 #[no_mangle]

@@ -193,3 +193,10 @@ void            clearpteu(pml4e_t *pgdir, char *uva);
 void            net_init(void);
 void            netintr(void);
 int             net_get_mac(uchar*, int);
+int             net_rx(uchar*, uint);
+void*           net_rx_chan(void);
+
+// netdev (Rust)
+void            netdevinit(void);
+int             netdevread(struct inode*, uint, char*, int);
+int             netdevwrite(struct inode*, uint, char*, int);

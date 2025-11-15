@@ -1,8 +1,8 @@
 KERNOBJS = \
 	bio.o console.o exec.o file.o fs.o ide.o ioapic.o kalloc.o kbd.o lapic.o \
   log.o main.o mp.o pipe.o proc.o sleeplock.o spinlock.o string.o swtch.o \
-  syscall.o sysfile.o sysproc.o trapasm.o trap.o uart.o vectors.o vm.o \
-  net.o
+	syscall.o sysfile.o sysproc.o trapasm.o trap.o uart.o vectors.o vm.o \
+	net.o netdev.o
 #
 
 UNAME_S := $(shell uname -s)
