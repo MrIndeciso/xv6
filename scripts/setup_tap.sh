@@ -5,7 +5,7 @@
 set -euo pipefail
 
 IFACE=${1:-xv6tap0}
-HOST_CIDR=${2:-192.168.76.1/24}
+HOST_CIDR=${2:-10.0.2.1/24}
 
 if [[ $(id -u) -ne 0 ]]; then
   echo "This script must be run as root (try again with sudo)." >&2

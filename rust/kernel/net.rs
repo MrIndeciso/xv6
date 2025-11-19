@@ -24,6 +24,13 @@ extern "C" {
     fn microdelay(us: i32);
     fn kalloc() -> *mut u8;
     fn wakeup(chan: *mut c_void);
+    fn ioapicenable(irq: i32, cpu: i32);
+}
+
+macro_rules! kprintf {
+    ($fmt:expr $(, $arg:expr )* $(,)?) => {{
+        unsafe { cprintf($fmt.as_ptr(), $( $arg ),*) }
+    }};
 }
 
 unsafe fn inl(port: u16) -> u32 {
@@ -52,6 +59,8 @@ const REG_EERD: usize        = 0x00014;
 const REG_TCTL: usize        = 0x00400;
 const REG_TIPG: usize        = 0x00410;
 const REG_ICR: usize         = 0x00C0;
+const REG_IMS: usize         = 0x00D0;
+const REG_RCTL: usize        = 0x00100;
 const REG_RXDESCLO: usize    = 0x02800;
 const REG_RXDESCHI: usize    = 0x02804;
 const REG_RXDESCLEN: usize   = 0x02808;
@@ -63,6 +72,10 @@ const REG_TXDESCHI: usize    = 0x03804;
 const REG_TXDESCLEN: usize   = 0x03808;
 const REG_TXDESCHEAD: usize  = 0x03810;
 const REG_TXDESCTAIL: usize  = 0x03818;
+const REG_RAL: usize         = 0x05400;
+const REG_RAH: usize         = 0x05404;
+const REG_MTA: usize         = 0x05200;
+const IRQ_NET: i32           = 11;
 
 const EERD_START: u32        = 1 << 0;
 const EERD_DONE: u32         = 1 << 4;
@@ -73,6 +86,10 @@ const RXDCTL_PTHRESH_SHIFT: u32 = 0;
 const RXDCTL_HTHRESH_SHIFT: u32 = 8;
 const RXDCTL_WTHRESH_SHIFT: u32 = 16;
 const RXDCTL_ENABLE: u32        = 1 << 25;
+const RCTL_EN: u32          = 1 << 1;
+const RCTL_BAM: u32         = 1 << 15;
+const RCTL_SECRC: u32       = 1 << 26;
+const RCTL_BSIZE_2048: u32  = 0;
 
 const TCTL_EN: u32          = 1 << 1;
 const TCTL_PSP: u32         = 1 << 3;
@@ -114,14 +131,12 @@ fn panic_handler(_info: &PanicInfo) -> ! {
 }
 
 fn cpanic(msg: &[u8]) -> ! {
-    unsafe { 
-        cprintf(msg.as_ptr());
-        panic(b"panic\0".as_ptr())
-    }
+    kprintf!(msg);
+    unsafe { panic(b"panic\0".as_ptr()) }
 }
 
 fn print(msg: &[u8]) {
-    unsafe { cprintf(msg.as_ptr()) }
+    kprintf!(msg)
 }
 
 fn pci_config_read_u32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
@@ -230,6 +245,31 @@ fn read_mac_address(state: &mut NetState) {
     state.mac[3] = (words[1] >> 8) as u8;
     state.mac[4] = (words[2] & 0xFF) as u8;
     state.mac[5] = (words[2] >> 8) as u8;
+}
+
+fn program_mac_filters(state: &NetState) {
+    let ral = (state.mac[0] as u32)
+        | ((state.mac[1] as u32) << 8)
+        | ((state.mac[2] as u32) << 16)
+        | ((state.mac[3] as u32) << 24);
+    let rah = (state.mac[4] as u32)
+        | ((state.mac[5] as u32) << 8)
+        | (1 << 31);
+    writereg(state, REG_RAL, ral);
+    writereg(state, REG_RAH, rah);
+
+    for i in 0..128 {
+        writereg(state, REG_MTA + (i * 4) as usize, 0);
+    }
+}
+
+fn enable_receiver(state: &NetState) {
+    let rctl = RCTL_EN | RCTL_BAM | RCTL_SECRC | RCTL_BSIZE_2048;
+    writereg(state, REG_RCTL, rctl);
+}
+
+fn enable_interrupts(state: &NetState) {
+    writereg(state, REG_IMS, INT_RXT0 | INT_TXDW);
 }
 
 fn rx_init(state: &mut NetState) {
@@ -349,17 +389,15 @@ fn setup_mmio(state: &mut NetState, bus: u8, slot: u8, func: u8) {
 }
 
 fn print_mac_address(state: &NetState) {
-    unsafe {
-        cprintf(
-            b"e1000 mac %b:%b:%b:%b:%b:%b\n\0".as_ptr(),
-            state.mac[0] as c_uint,
-            state.mac[1] as c_uint,
-            state.mac[2] as c_uint,
-            state.mac[3] as c_uint,
-            state.mac[4] as c_uint,
-            state.mac[5] as c_uint,
-        );
-    }
+    kprintf!(
+        b"e1000 mac %b:%b:%b:%b:%b:%b\n\0",
+        state.mac[0] as c_uint,
+        state.mac[1] as c_uint,
+        state.mac[2] as c_uint,
+        state.mac[3] as c_uint,
+        state.mac[4] as c_uint,
+        state.mac[5] as c_uint,
+    );
 }
 
 fn net_init_internal() {
@@ -378,8 +416,19 @@ fn net_init_internal() {
     print_mac_address(state);
     print(b"Initializing RX ring...\n\0");
     rx_init(state);
+    print(b"net: rx ring ready\n\0");
     print(b"Initializing TX ring...\n\0");
     tx_init(state);
+    print(b"net: tx ring ready\n\0");
+    program_mac_filters(state);
+    print(b"net: mac filters programmed\n\0");
+    enable_receiver(state);
+    print(b"net: receiver enabled\n\0");
+    enable_interrupts(state);
+    print(b"net: interrupts enabled\n\0");
+    unsafe {
+        ioapicenable(IRQ_NET, 0);
+    }
     state.initialized = true;
 }
 
@@ -443,6 +492,11 @@ pub extern "C" fn net_rx(dst: *mut u8, len: u32) -> i32 {
     }
 
     if desc.errors != 0 {
+        kprintf!(
+            b"net: rx descriptor %d errors %d\n\0",
+            idx as c_uint,
+            desc.errors as c_uint,
+        );
         recycle_rx_desc(state, idx);
         return -1;
     }
@@ -463,6 +517,11 @@ pub extern "C" fn net_rx(dst: *mut u8, len: u32) -> i32 {
     unsafe {
         ptr::copy_nonoverlapping(buf, dst, pkt_len);
     }
+    kprintf!(
+        b"net: rx packet idx %d len %d\n\0",
+        idx as c_uint,
+        pkt_len as c_uint,
+    );
 
     recycle_rx_desc(state, idx);
     pkt_len as i32
@@ -486,6 +545,7 @@ pub extern "C" fn net_tx(src: *const u8, len: u32) -> i32 {
     let idx = state.tx_tail as usize;
     let desc = unsafe { &mut *state.tx_descs.add(idx) };
     if (desc.status & TX_STATUS_DD) == 0 {
+        kprintf!(b"net: tx descriptor %d busy\n\0", idx as c_uint);
         return 0;
     }
 
@@ -498,6 +558,12 @@ pub extern "C" fn net_tx(src: *const u8, len: u32) -> i32 {
     unsafe {
         ptr::copy_nonoverlapping(src, buf, copy_len);
     }
+
+    kprintf!(
+        b"net: tx packet idx %d len %d\n\0",
+        idx as c_uint,
+        copy_len as c_uint,
+    );
 
     desc.length = copy_len as u16;
     desc.cso = 0;
@@ -536,6 +602,7 @@ pub extern "C" fn netintr() {
     if icr == 0 {
         return;
     }
+    kprintf!(b"net: interrupt icr=%x\n\0", icr as c_uint);
 
     if (icr & INT_RXT0) != 0 {
         net_wakeup_rx(state);
