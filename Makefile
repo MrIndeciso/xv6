@@ -165,7 +165,7 @@ clean:
 	_*
 
 # make a printout
-FILES = $(shell grep -v '^\#' runoff.list)
+FILES = $(shell grep -v '^#' runoff.list)
 PRINT = runoff.list runoff.spec README toc.hdr toc.ftr $(FILES)
 
 xv6.pdf: $(PRINT)
@@ -191,14 +191,24 @@ CPUS := 2
 endif
 QEMUOPTS = -cpu qemu64,+rdtscp -nic none -netdev user,id=net0 -device e1000,netdev=net0 -hda xv6.img -hdb fs.img -smp sockets=$(CPUS) -m 512 $(QEMUEXTRA)
 
+TAP_IFACE ?= xv6tap0
+QEMU_TAP_NETDEV = -netdev tap,id=net0,ifname=$(TAP_IFACE),script=no,downscript=no
+QEMU_TAP_OPTS = -cpu qemu64,+rdtscp -nic none $(QEMU_TAP_NETDEV) -device e1000,netdev=net0 -hda xv6.img -hdb fs.img -smp sockets=$(CPUS) -m 512 $(QEMUEXTRA)
+
 qemu: fs.img xv6.img
 	$(QEMU) -serial mon:stdio $(QEMUOPTS)
+
+qemu-tap: fs.img xv6.img
+	$(QEMU) -serial mon:stdio $(QEMU_TAP_OPTS)
 
 qemu-memfs: xv6memfs.img
 	$(QEMU) -drive file=xv6memfs.img,index=0,media=disk,format=raw -smp $(CPUS) -m 256
 
 qemu-nox: fs.img xv6.img
 	$(QEMU) -nographic $(QEMUOPTS) -action reboot=shutdown
+
+qemu-nox-tap: fs.img xv6.img
+	$(QEMU) -nographic $(QEMU_TAP_OPTS) -action reboot=shutdown
 
 .gdbinit: .gdbinit.tmpl
 	sed "s/localhost:1234/localhost:$(GDBPORT)/" < $^ > $@
