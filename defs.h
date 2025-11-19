@@ -195,6 +195,8 @@ void            netintr(void);
 int             net_get_mac(uchar*, int);
 int             net_rx(uchar*, uint);
 void*           net_rx_chan(void);
+int             net_tx(const uchar*, uint);
+void*           net_tx_chan(void);
 
 // netdev (Rust)
 void            netdevinit(void);

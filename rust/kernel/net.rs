@@ -83,6 +83,9 @@ const INT_TXDW: u32         = 1 << 0;
 const INT_RXT0: u32         = 1 << 7;
 const RX_STATUS_DD: u8      = 1 << 0;
 const RX_STATUS_EOP: u8     = 1 << 1;
+const TX_CMD_EOP: u8        = 1 << 0;
+const TX_CMD_IFCS: u8       = 1 << 1;
+const TX_CMD_RS: u8         = 1 << 3;
 static STATE: NetStateCell = NetStateCell::new(NetState {
     mmio: ptr::null_mut(),
     mac: [0; 6],
@@ -99,6 +102,7 @@ static STATE: NetStateCell = NetStateCell::new(NetState {
 });
 
 static mut RX_WAIT_CHAN: u8 = 0;
+static mut TX_WAIT_CHAN: u8 = 0;
 
 fn v2p(addr: *mut u8) -> u64 {
     (addr as u64).wrapping_sub(KERNBASE)
@@ -383,6 +387,10 @@ fn rx_wait_channel() -> *mut c_void {
     ptr::addr_of_mut!(RX_WAIT_CHAN).cast::<c_void>()
 }
 
+fn tx_wait_channel() -> *mut c_void {
+    ptr::addr_of_mut!(TX_WAIT_CHAN).cast::<c_void>()
+}
+
 fn recycle_rx_desc(state: &mut NetState, idx: usize) {
     unsafe {
         let desc = &mut *state.rx_descs.add(idx);
@@ -406,6 +414,10 @@ fn net_wakeup_rx(state: &mut NetState) {
     if (desc.status & RX_STATUS_DD) != 0 && (desc.status & RX_STATUS_EOP) != 0 {
         unsafe { wakeup(rx_wait_channel()); }
     }
+}
+
+fn net_wakeup_tx() {
+    unsafe { wakeup(tx_wait_channel()); }
 }
 
 #[no_mangle]
@@ -457,8 +469,58 @@ pub extern "C" fn net_rx(dst: *mut u8, len: u32) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn net_tx(src: *const u8, len: u32) -> i32 {
+    if src.is_null() || len == 0 {
+        return -1;
+    }
+
+    if (len as usize) > PGSIZE {
+        return -1;
+    }
+
+    let state = unsafe { STATE.get() };
+    if !state.initialized || state.tx_descs.is_null() {
+        return -1;
+    }
+
+    let idx = state.tx_tail as usize;
+    let desc = unsafe { &mut *state.tx_descs.add(idx) };
+    if (desc.status & TX_STATUS_DD) == 0 {
+        return 0;
+    }
+
+    let buf = state.tx_buffers[idx];
+    if buf.is_null() {
+        return -1;
+    }
+
+    let copy_len = len as usize;
+    unsafe {
+        ptr::copy_nonoverlapping(src, buf, copy_len);
+    }
+
+    desc.length = copy_len as u16;
+    desc.cso = 0;
+    desc.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
+    desc.status = 0;
+    desc.css = 0;
+    desc.special = 0;
+
+    let next = (idx + 1) % NET_TX_DESC_COUNT;
+    state.tx_tail = next as u32;
+    writereg(state, REG_TXDESCTAIL, next as u32);
+
+    copy_len as i32
+}
+
+#[no_mangle]
 pub extern "C" fn net_rx_chan() -> *mut c_void {
     rx_wait_channel()
+}
+
+#[no_mangle]
+pub extern "C" fn net_tx_chan() -> *mut c_void {
+    tx_wait_channel()
 }
 
 #[no_mangle]
@@ -480,7 +542,7 @@ pub extern "C" fn netintr() {
     }
 
     if (icr & INT_TXDW) != 0 {
-        // transmit interrupt acknowledged
+        net_wakeup_tx();
     }
 }
 

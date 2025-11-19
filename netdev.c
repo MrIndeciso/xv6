@@ -6,6 +6,7 @@
 #include "fs.h"
 #include "file.h"
 #include "proc.h"
+#include "mmu.h"
 
 static struct spinlock netdevlock;
 
@@ -25,6 +26,35 @@ netdev_read_locked(char *dst, int n)
 
     sleep(net_rx_chan(), &netdevlock);
   }
+}
+
+static int
+netdev_write_locked(char *src, int n)
+{
+  if (src == 0 || n <= 0)
+    return 0;
+
+  int written = 0;
+  while (written < n) {
+    if (proc && proc->killed)
+      return -1;
+
+    int chunk = n - written;
+    if (chunk > PGSIZE)
+      chunk = PGSIZE;
+
+    int r = net_tx((uchar*)src + written, (uint)chunk);
+    if (r > 0) {
+      written += r;
+      continue;
+    }
+    if (r < 0)
+      return written > 0 ? written : -1;
+
+    sleep(net_tx_chan(), &netdevlock);
+  }
+
+  return written;
 }
 
 void
@@ -57,9 +87,10 @@ netdevwrite(struct inode *ip, uint off, char *src, int n)
     return -1;
 
   (void)off;
-  (void)src;
-  (void)n;
   iunlock(ip);
+  acquire(&netdevlock);
+  int r = netdev_write_locked(src, n);
+  release(&netdevlock);
   ilock(ip);
-  return -1;
+  return r;
 }
